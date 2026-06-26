@@ -54,88 +54,88 @@ Proyek ini mendukung **3 peran pengguna utama**:
 
 ## Arsitektur Sistem
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                              CLIENTS                                       │
-│                    Web App / Mobile App / Third-Party                      │
-└──────────────────────────────┬─────────────────────────────────────────────┘
-                               │ HTTPS (Port 8000)
-                               ▼
-┌──────────────────────────────────────────────────────────────────────────┐
-│                    KONG API GATEWAY 3.6                                    │
-│              Rate Limiting · CORS · Service Routing                       │
-└────┬────────────┬────────────┬────────────┬────────────┬───────────────┘
-     │            │            │            │            │
-  /api/v1/auth  /api/v1/     /api/v1/    /api/v1/     /api/v1/
-  /api/v1/user- /notif-      /schools    /setting-*  /applicants
-  profile       cations                              /payment /webhook
-     │            │            │            │            │
-┌────▼────┐  ┌───▼────┐ ┌───▼────┐ ┌───▼────┐ ┌───▼────┐
-│  USER   │  │NOTIF   │ │ SCHOOL │ │SETTING │ │  PPDB  │
-│ :8001   │  │ :8002  │ │ :8003  │ │ :8004  │ │ :8005  │
-└────┬────┘  └───┬────┘ └───┬────┘ └───┬────┘ └───┬────┘
-     │            │            │            │            │
-     └────────────┴─────┬──────┴────────────┴────────────┘
-                        │
-             ┌───────────▼───────────┐
-             │   RabbitMQ / CloudAMQP │   ← Async Event Bus
-             │   ppdb_exchange        │     (Gevent-compatible)
-             └───────────┬───────────┘
-                         │
-             ┌───────────▼───────────┐
-             │       Workers         │
-             │  (RabbitMQ Consumers) │
-             │  • Email sender       │
-             │  • PDF generator      │
-             │  • Event processor    │
-             └───────────────────────┘
+```mermaid
+graph TB
+    subgraph Clients["CLIENTS"]
+        WA["Web App"]
+        MA["Mobile App"]
+        TP["Third-Party"]
+    end
 
-┌──────────────────────────────────────────────────────────────────────────┐
-│                          EXTERNAL SERVICES                                │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────────┐  │
-│  │   Midtrans   │  │  SendGrid /  │  │        Supabase               │  │
-│  │  (Payment)   │  │   Resend     │  │  (Storage + PostgreSQL)      │  │
-│  │              │  │  (Email)     │  │                               │  │
-│  │              │  │              │  │                               │  │
-│  └──────────────┘  └──────────────┘  └──────────────────────────────┘  │
-│                                                                          
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────────┐  │
-│  │    Redis     │  │   Google     │  │      CloudAMQP               │  │
-│  │   (Cache)    │  │  OAuth 2.0   │  │      (RabbitMQ)              │  │
-│  │              │  │              │  │                               │  │
-│  └──────────────┘  └──────────────┘  └──────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────────────┘
+    subgraph Kong["KONG API GATEWAY 3.6"]
+        KG["Rate Limiting · CORS · Service Routing"]
+    end
+
+    subgraph Services["Microservices"]
+        US["USER SERVICE<br/>:8001"]
+        NS["NOTIF SERVICE<br/>:8002"]
+        SS["SCHOOL SERVICE<br/>:8003"]
+        ST["SETTING SERVICE<br/>:8004"]
+        PS["PPDB SERVICE<br/>:8005"]
+    end
+
+    subgraph Broker["RabbitMQ / CloudAMQP"]
+        RMQ["ppdb_exchange<br/>(direct, durable)"]
+    end
+
+    subgraph Workers["Workers (RabbitMQ Consumers)"]
+        EM["Email Sender"]
+        PG["PDF Generator"]
+        EP["Event Processor"]
+    end
+
+    subgraph External["EXTERNAL SERVICES"]
+        MID["Midtrans"]
+        EMG["SendGrid / Resend"]
+        SUP["Supabase<br/>(Storage + PostgreSQL)"]
+        RD["Redis"]
+        GGL["Google OAuth 2.0"]
+        CAMQP["CloudAMQP"]
+        PG16["PostgreSQL 16<br/>(5 databases)"]
+    end
+
+    WA & MA & TP -->|"HTTPS :8000"| KG
+    KG --> US & NS & SS & ST & PS
+    US & NS & SS & ST & PS --> RMQ
+    RMQ --> EM & PG & EP
 ```
 
 ### Alur Komunikasi Antar Service
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                  SYNCHRONOUS (HTTP Request-Response)                     │
-│                                                                         │
-│  PPDB Service ──HTTP──▶ School Service (validate school existence)    │
-│  PPDB Service ──HTTP──▶ Setting Service (fetch track/form config)      │
-│  User Service  ──HTTP──▶ Notification Service (internal endpoints)    │
-│                                                                         │
-│  Auth: X-Service-Secret header (HMAC-SHA256)                           │
-│  Pattern: BaseServiceClient + Cache-Aside + Stale Cache Fallback        │
-└─────────────────────────────────────────────────────────────────────────┘
+#### Synchronous (HTTP Request-Response)
 
-┌─────────────────────────────────────────────────────────────────────────┐
-│                  ASYNCHRONOUS (RabbitMQ / CloudAMQP)                     │
-│                                                                         │
-│  User Service ──publish──▶ ppdb_exchange                               │
-│  PPDB Service ──publish──▶ ppdb_exchange                               │
-│  School Service ──publish──▶ ppdb_exchange                              │
-│                                                                         │
-│  Notification Worker: consumes events → sends email/PDF/notif          │
-│  Validation Worker: consumes validation.request → returns response      │
-│                                                                         │
-│  Dual Publish: Pika (native RabbitMQ) + HTTP fallback (gevent compat)  │
-│  Exchange: ppdb_exchange (type: direct, durable)                        │
-│  Queues: ppdb_queue, ppdb.validation.request, ppdb.validation.response  │
-└─────────────────────────────────────────────────────────────────────────┘
+```mermaid
+sequenceDiagram
+    participant P as PPDB Service
+    participant Sch as School Service
+    participant Set as Setting Service
+    participant U as User Service
+    participant N as Notification Service
+
+    P->>Sch: HTTP GET /internal/schools/validate?id={id}
+    P->>Set: HTTP GET /setting-*
+    U->>N: HTTP POST /internal/notifications
+    Note over P,N: Auth: X-Service-Secret header (HMAC-SHA256)<br/>Pattern: BaseServiceClient + Cache-Aside + Stale Cache Fallback
 ```
+
+#### Asynchronous (RabbitMQ / CloudAMQP)
+
+```mermaid
+sequenceDiagram
+    participant U as User Service
+    participant P as PPDB Service
+    participant Sch as School Service
+    participant Ex as ppdb_exchange
+    participant W as Notification Worker
+
+    U->>Ex: publish("user.registered")
+    P->>Ex: publish("payment.completed")
+    Sch->>Ex: publish("school.created")
+
+    Ex->>W: notification_queue
+    Note over W: 1. Lookup mapping<br/>2. Render template<br/>3. Send email/PDF<br/>4. Log delivery
+
+    Note over Ex: Exchange: ppdb_exchange<br/>type: direct, durable<br/>Queues: ppdb_queue,<br/>ppdb.validation.request/response
 
 ---
 
@@ -374,20 +374,23 @@ services:
 
 ### Synchronous — HTTP + Cache-Aside
 
-Service lain memanggil School Service untuk validasi:
+```mermaid
+sequenceDiagram
+    participant P as PPDB Service
+    participant Sch as School Service
+    participant Redis as Redis Cache<br/>TTL: 1 hour
+    participant DB as PostgreSQL<br/>school_db
 
-```
-PPDB Service  ──HTTP GET /internal/schools/validate?id={id}──▶  School Service
-                                                                    │
-                                                           ┌───────▼────────┐
-                                                           │ Redis Cache    │
-                                                           │ TTL: 1 hour   │
-                                                           │ NS: school    │
-                                                           └───────────────┘
-                                                           │
-                                               Cache hit? ─┘
-                                                 No  ──▶ PostgreSQL school_db
-                                                 Yes ──▶ Return cached
+    P->>Sch: HTTP GET /internal/schools/validate?id={id}
+    Sch->>Redis: Check cache
+    alt Cache hit
+        Redis-->>Sch: Return cached
+    else Cache miss
+        Sch->>DB: Query school_db
+        DB-->>Sch: Return data
+        Sch->>Redis: Store in cache
+    end
+    Sch-->>P: Response
 ```
 
 **BaseServiceClient features:**
@@ -398,23 +401,31 @@ PPDB Service  ──HTTP GET /internal/schools/validate?id={id}──▶  School
 
 ### Asynchronous — RabbitMQ / CloudAMQP
 
-```
-User Service  ──publish("user.registered")──▶ ppdb_exchange
-PPDB Service  ──publish("payment.completed")──▶ ppdb_exchange
-School Service───publish("school.created")──▶ ppdb_exchange
-                                                        │
-                                               Routing Key ─────────┐
-                                                        │             │
-                                                        ▼             ▼
-                                              notification_queue  other_queue
-                                                        │
-                                             ┌──────────▼──────────┐
-                                             │ Notification Worker │
-                                             │  1. Lookup mapping  │
-                                             │  2. Render template │
-                                             │  3. Send email/PDF  │
-                                             │  4. Log delivery    │
-                                             └─────────────────────┘
+```mermaid
+flowchart LR
+    subgraph Publishers
+        US["User Service<br/>publish('user.registered')"]
+        PS["PPDB Service<br/>publish('payment.completed')"]
+        SS["School Service<br/>publish('school.created')"]
+    end
+
+    subgraph Exchange["ppdb_exchange"]
+        EX["direct, durable"]
+    end
+
+    subgraph Queues
+        NQ["notification_queue"]
+        VQ["validation_queue"]
+    end
+
+    subgraph Workers
+        NW["Notification Worker"]
+    end
+
+    US & PS & SS --> EX
+    EX -->|"routing key"| NQ & VQ
+    NQ --> NW
+    NW --> Email["Send Email / PDF"]
 ```
 
 **RabbitMQ Configuration:**
@@ -462,21 +473,55 @@ School Service───publish("school.created")──▶ ppdb_exchange
 
 Setiap microservice memiliki database PostgreSQL sendiri (tidak ada shared database):
 
-```
-┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
-│  user_db    │  │school_db    │  │setting_db   │  │  ppdb_db    │  │notification_│
-│             │  │             │  │             │  │             │  │    db       │
-│ • users     │  │ • schools   │  │ • majors    │  │• applicants │  │• notifications│
-│• user_prof  │  │• school_    │  │• admission  │  │• applicant_ │  │• templates  │
-│• roles      │  │  documents  │  │  _tracks    │  │  payments   │  │• mappings   │
-│• invitations│  │• school_    │  │• periods    │  │• form_      │  │• logs       │
-│• refresh_   │  │  logs       │  │• payment_   │  │  responses  │  │             │
-│  tokens     │  │             │  │  channels   │  │• applicant_ │  │             │
-│• user_      │  │             │  │• reg_flows  │  │  docs       │  │             │
-│  documents  │  │             │  │• custom_    │  │• grades     │  │             │
-│             │  │             │  │  forms      │  │• selection_ │  │             │
-│             │  │             │  │             │  │  results    │  │             │
-└─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘
+```mermaid
+erDiagram
+    USER_DB {
+        int id PK
+        string email
+        string name
+        timestamp created_at
+    }
+    USER_DB ||--o{ USER_PROFILE : has
+    USER_DB ||--o{ INVITATION : sends
+    USER_DB ||--o{ USER_DOCUMENT : uploads
+    USER_DB ||--o{ REFRESH_TOKEN : has
+    USER_DB ||--o{ USER_LOG : records
+
+    SCHOOL_DB {
+        int id PK
+        string name
+        string address
+        timestamp created_at
+    }
+    SCHOOL_DB ||--o{ SCHOOL_DOCUMENT : has
+    SCHOOL_DB ||--o{ SCHOOL_LOG : records
+
+    SETTING_DB {
+        int id PK
+    }
+    SETTING_DB ||--o{ MAJOR : contains
+    SETTING_DB ||--o{ ADMISSION_TRACK : defines
+    SETTING_DB ||--o{ PERIOD_ACADEMIC : defines
+    SETTING_DB ||--o{ PAYMENT_CHANNEL : has
+    SETTING_DB ||--o{ REGISTRATION_FLOW : defines
+    SETTING_DB ||--o{ CUSTOM_FORM : has
+
+    PPDB_DB {
+        int id PK
+    }
+    PPDB_DB ||--o{ APPLICANT : registers
+    PPDB_DB ||--o{ APPLICANT_PAYMENT : processes
+    PPDB_DB ||--o{ APPLICANT_DOCUMENT : receives
+    PPDB_DB ||--o{ FORM_RESPONSE : collects
+    PPDB_DB ||--o{ APPLICANT_GRADE : records
+    PPDB_DB ||--o{ APPLICANT_SELECTION_RESULT : produces
+
+    NOTIFICATION_DB {
+        int id PK
+    }
+    NOTIFICATION_DB ||--o{ NOTIFICATION : sends
+    NOTIFICATION_DB ||--o{ NOTIFICATION_TEMPLATE : stores
+    NOTIFICATION_DB ||--o{ NOTIFICATION_MAPPING : maps
 ```
 
 **Multi-Tenant Pattern:** Setiap tabel memiliki kolom `school_id` untuk isolasi data antar sekolah.
@@ -485,18 +530,24 @@ Setiap microservice memiliki database PostgreSQL sendiri (tidak ada shared datab
 
 ## CI/CD Pipeline
 
-```
-Branch: develop
-  └── Stage: test        → pytest (SQLite in-memory)
-  └── ✗ Tidak build
+```mermaid
+flowchart TD
+    subgraph develop["Branch: develop"]
+        D1["Stage: test"] --> pytest["pytest<br/>(SQLite in-memory)"]
+        pytest -->|X| NoBuild["Tidak build"]
+    end
 
-Branch: staging
-  └── Stage: test        → pytest
-  └── Stage: build       → Docker build + push to GitLab Registry
+    subgraph staging["Branch: staging"]
+        S1["Stage: test"] --> S_pytest["pytest"]
+        S_pytest --> S2["Stage: build"]
+        S2 --> S3["Docker build + push<br/>GitLab Registry"]
+    end
 
-Branch: main (production)
-  └── Stage: test        → pytest
-  └── Stage: build       → Docker build + push to GitLab Registry (tag: latest)
+    subgraph main["Branch: main (production)"]
+        M1["Stage: test"] --> M_pytest["pytest"]
+        M_pytest --> M2["Stage: build"]
+        M2 --> M3["Docker build + push<br/>GitLab Registry<br/>tag: latest"]
+    end
 ```
 
 ### Testing Strategy
@@ -579,38 +630,48 @@ pytest tests/integration/ -v
 
 Diagram arsitektur lengkap tersedia di [`docs/architecture-diagram.jpg`](docs/architecture-diagram.jpg).
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                          EXTERNAL CLIENTS                                │
-│                     (Web App / Mobile / Third Party)                      │
-└────────────────────────────┬─────────────────────────────────────────────┘
-                             │ HTTPS
-                             ▼
-┌──────────────────────────────────────────────────────────────────────────┐
-│                  KONG API GATEWAY (Port 8000)                             │
-│          Rate Limiting │ CORS │ Auth │ Service Routing                   │
-└────┬──────────┬──────────┬──────────┬──────────┬────────────────────────┘
-     │          │          │          │          │
-  ┌──▼───┐  ┌──▼───┐  ┌──▼───┐  ┌──▼───┐  ┌──▼───┐
-  │USER  │  │NOTIF │  │SCHOOL│  │SETTING│  │PPDB  │
-  │:8001 │  │:8002 │  │:8003 │  │:8004  │  │:8005 │
-  └──┬───┘  └──┬───┘  └──┬───┘  └──┬───┘  └──┬───┘
-     └─────────┴─────────┴─────────┴─────────┘
-                       │
-         ┌─────────────▼─────────────┐
-         │  RABBITMQ / CloudAMQP      │  ← Async Event Bus
-         │  ppdb_exchange (direct)    │
-         └─────────────┬─────────────┘
-                       │ Workers (consumers)
-         ┌─────────────▼─────────────┐
-         │  • Email Sender           │
-         │  • PDF Generator           │
-         │  • Event Processor         │
-         └────────────────────────────┘
+```mermaid
+graph TB
+    subgraph Clients["EXTERNAL CLIENTS"]
+        WA["Web App"]
+        MA["Mobile App"]
+        TP["Third Party"]
+    end
 
-┌──────────────────────────────────────────────────────────────────────────┐
-│                         EXTERNAL SERVICES                                 │
-│  PostgreSQL 16 (5 databases)  │  Redis  │  Midtrans  │  Supabase       │
-│  SendGrid + Resend (Email)    │  Google OAuth  │  CloudAMQP           │
-└──────────────────────────────────────────────────────────────────────────┘
+    subgraph Kong["KONG API GATEWAY<br/>(Port 8000)"]
+        KG["Rate Limiting · CORS · Auth · Service Routing"]
+    end
+
+    subgraph Services["Microservices"]
+        US["USER :8001"]
+        NS["NOTIF :8002"]
+        SS["SCHOOL :8003"]
+        ST["SETTING :8004"]
+        PS["PPDB :8005"]
+    end
+
+    subgraph Broker["RABBITMQ / CloudAMQP"]
+        RMQ["ppdb_exchange (direct)"]
+    end
+
+    subgraph Workers["Workers (consumers)"]
+        EM["Email Sender"]
+        PG["PDF Generator"]
+        EP["Event Processor"]
+    end
+
+    subgraph External["EXTERNAL SERVICES"]
+        E1["PostgreSQL 16 (5 DBs)"]
+        E2["Redis"]
+        E3["Midtrans"]
+        E4["Supabase"]
+        E5["SendGrid + Resend"]
+        E6["Google OAuth"]
+        E7["CloudAMQP"]
+    end
+
+    WA & MA & TP -->|"HTTPS"| Kong
+    Kong --> US & NS & SS & ST & PS
+    US & NS & SS & ST & PS --> RMQ
+    RMQ --> EM & PG & EP
 ```
