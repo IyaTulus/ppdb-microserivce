@@ -56,45 +56,45 @@ Proyek ini mendukung **3 peran pengguna utama**:
 
 ```mermaid
 graph TB
-    subgraph Clients["CLIENTS"]
-        WA["Web App"]
-        MA["Mobile App"]
-        TP["Third-Party"]
+    subgraph Clients
+        WA[Web App]
+        MA[Mobile App]
+        TP[Third-Party]
     end
 
-    subgraph Kong["KONG API GATEWAY 3.6"]
-        KG["Rate Limiting · CORS · Service Routing"]
+    subgraph Kong[KONG API GATEWAY 3.6]
+        KG[Rate Limiting / CORS / Routing]
     end
 
-    subgraph Services["Microservices"]
-        US["USER SERVICE<br/>:8001"]
-        NS["NOTIF SERVICE<br/>:8002"]
-        SS["SCHOOL SERVICE<br/>:8003"]
-        ST["SETTING SERVICE<br/>:8004"]
-        PS["PPDB SERVICE<br/>:8005"]
+    subgraph Services[Microservices]
+        US[USER :8001]
+        NS[NOTIF :8002]
+        SS[SCHOOL :8003]
+        ST[SETTING :8004]
+        PS[PPDB :8005]
     end
 
-    subgraph Broker["RabbitMQ / CloudAMQP"]
-        RMQ["ppdb_exchange<br/>(direct, durable)"]
+    subgraph Broker[RabbitMQ / CloudAMQP]
+        RMQ[ppdb_exchange]
     end
 
-    subgraph Workers["Workers (RabbitMQ Consumers)"]
-        EM["Email Sender"]
-        PG["PDF Generator"]
-        EP["Event Processor"]
+    subgraph Workers[Workers]
+        EM[Email Sender]
+        PG[PDF Generator]
+        EP[Event Processor]
     end
 
-    subgraph External["EXTERNAL SERVICES"]
-        MID["Midtrans"]
-        EMG["SendGrid / Resend"]
-        SUP["Supabase<br/>(Storage + PostgreSQL)"]
-        RD["Redis"]
-        GGL["Google OAuth 2.0"]
-        CAMQP["CloudAMQP"]
-        PG16["PostgreSQL 16<br/>(5 databases)"]
+    subgraph External[External Services]
+        MID[Midtrans]
+        EMG[SendGrid / Resend]
+        SUP[Supabase]
+        RD[Redis]
+        GGL[Google OAuth]
+        CAMQP[CloudAMQP]
+        PG16[PostgreSQL 16]
     end
 
-    WA & MA & TP -->|"HTTPS :8000"| KG
+    WA & MA & TP --> KG
     KG --> US & NS & SS & ST & PS
     US & NS & SS & ST & PS --> RMQ
     RMQ --> EM & PG & EP
@@ -112,10 +112,9 @@ sequenceDiagram
     participant U as User Service
     participant N as Notification Service
 
-    P->>Sch: HTTP GET /internal/schools/validate?id={id}
+    P->>Sch: HTTP GET /internal/schools/validate
     P->>Set: HTTP GET /setting-*
     U->>N: HTTP POST /internal/notifications
-    Note over P,N: Auth: X-Service-Secret header (HMAC-SHA256)<br/>Pattern: BaseServiceClient + Cache-Aside + Stale Cache Fallback
 ```
 
 #### Asynchronous (RabbitMQ / CloudAMQP)
@@ -128,14 +127,11 @@ sequenceDiagram
     participant Ex as ppdb_exchange
     participant W as Notification Worker
 
-    U->>Ex: publish("user.registered")
-    P->>Ex: publish("payment.completed")
-    Sch->>Ex: publish("school.created")
-
+    U->>Ex: publish user.registered
+    P->>Ex: publish payment.completed
+    Sch->>Ex: publish school.created
     Ex->>W: notification_queue
-    Note over W: 1. Lookup mapping<br/>2. Render template<br/>3. Send email/PDF<br/>4. Log delivery
-
-    Note over Ex: Exchange: ppdb_exchange<br/>type: direct, durable<br/>Queues: ppdb_queue,<br/>ppdb.validation.request/response
+```
 
 ---
 
@@ -378,10 +374,10 @@ services:
 sequenceDiagram
     participant P as PPDB Service
     participant Sch as School Service
-    participant Redis as Redis Cache<br/>TTL: 1 hour
-    participant DB as PostgreSQL<br/>school_db
+    participant Redis as Redis Cache
+    participant DB as PostgreSQL
 
-    P->>Sch: HTTP GET /internal/schools/validate?id={id}
+    P->>Sch: HTTP GET /internal/schools/validate
     Sch->>Redis: Check cache
     alt Cache hit
         Redis-->>Sch: Return cached
@@ -403,29 +399,13 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-    subgraph Publishers
-        US["User Service<br/>publish('user.registered')"]
-        PS["PPDB Service<br/>publish('payment.completed')"]
-        SS["School Service<br/>publish('school.created')"]
-    end
-
-    subgraph Exchange["ppdb_exchange"]
-        EX["direct, durable"]
-    end
-
-    subgraph Queues
-        NQ["notification_queue"]
-        VQ["validation_queue"]
-    end
-
-    subgraph Workers
-        NW["Notification Worker"]
-    end
-
-    US & PS & SS --> EX
-    EX -->|"routing key"| NQ & VQ
-    NQ --> NW
-    NW --> Email["Send Email / PDF"]
+    US[User Service] -->|publish| EX[ppdb_exchange]
+    PS[PPDB Service] -->|publish| EX
+    SS[School Service] -->|publish| EX
+    EX -->|routing key| NQ[notification_queue]
+    EX -->|routing key| VQ[validation_queue]
+    NQ --> NW[Notification Worker]
+    NW --> Email[Send Email / PDF]
 ```
 
 **RabbitMQ Configuration:**
@@ -474,54 +454,49 @@ flowchart LR
 Setiap microservice memiliki database PostgreSQL sendiri (tidak ada shared database):
 
 ```mermaid
-erDiagram
-    USER_DB {
-        int id PK
-        string email
-        string name
-        timestamp created_at
-    }
-    USER_DB ||--o{ USER_PROFILE : has
-    USER_DB ||--o{ INVITATION : sends
-    USER_DB ||--o{ USER_DOCUMENT : uploads
-    USER_DB ||--o{ REFRESH_TOKEN : has
-    USER_DB ||--o{ USER_LOG : records
+flowchart TB
+    subgraph USER_DB["user_db"]
+        U1[users]
+        U2[user_profiles]
+        U3[roles]
+        U4[invitations]
+        U5[user_documents]
+        U6[refresh_tokens]
+        U7[user_logs]
+    end
 
-    SCHOOL_DB {
-        int id PK
-        string name
-        string address
-        timestamp created_at
-    }
-    SCHOOL_DB ||--o{ SCHOOL_DOCUMENT : has
-    SCHOOL_DB ||--o{ SCHOOL_LOG : records
+    subgraph SCHOOL_DB["school_db"]
+        S1[schools]
+        S2[school_documents]
+        S3[school_logs]
+    end
 
-    SETTING_DB {
-        int id PK
-    }
-    SETTING_DB ||--o{ MAJOR : contains
-    SETTING_DB ||--o{ ADMISSION_TRACK : defines
-    SETTING_DB ||--o{ PERIOD_ACADEMIC : defines
-    SETTING_DB ||--o{ PAYMENT_CHANNEL : has
-    SETTING_DB ||--o{ REGISTRATION_FLOW : defines
-    SETTING_DB ||--o{ CUSTOM_FORM : has
+    subgraph SETTING_DB["setting_db"]
+        T1[majors]
+        T2[admission_tracks]
+        T3[period_academics]
+        T4[payment_channels]
+        T5[registration_flows]
+        T6[custom_forms]
+        T7[major_document_requirements]
+        T8[major_grade_requirements]
+    end
 
-    PPDB_DB {
-        int id PK
-    }
-    PPDB_DB ||--o{ APPLICANT : registers
-    PPDB_DB ||--o{ APPLICANT_PAYMENT : processes
-    PPDB_DB ||--o{ APPLICANT_DOCUMENT : receives
-    PPDB_DB ||--o{ FORM_RESPONSE : collects
-    PPDB_DB ||--o{ APPLICANT_GRADE : records
-    PPDB_DB ||--o{ APPLICANT_SELECTION_RESULT : produces
+    subgraph PPDB_DB["ppdb_db"]
+        P1[applicants]
+        P2[applicant_payments]
+        P3[applicant_documents]
+        P4[form_responses]
+        P5[applicant_grades]
+        P6[applicant_selection_results]
+    end
 
-    NOTIFICATION_DB {
-        int id PK
-    }
-    NOTIFICATION_DB ||--o{ NOTIFICATION : sends
-    NOTIFICATION_DB ||--o{ NOTIFICATION_TEMPLATE : stores
-    NOTIFICATION_DB ||--o{ NOTIFICATION_MAPPING : maps
+    subgraph NOTIF_DB["notification_db"]
+        N1[notifications]
+        N2[notification_templates]
+        N3[notification_mappings]
+        N4[notification_logs]
+    end
 ```
 
 **Multi-Tenant Pattern:** Setiap tabel memiliki kolom `school_id` untuk isolasi data antar sekolah.
@@ -532,21 +507,21 @@ erDiagram
 
 ```mermaid
 flowchart TD
-    subgraph develop["Branch: develop"]
-        D1["Stage: test"] --> pytest["pytest<br/>(SQLite in-memory)"]
-        pytest -->|X| NoBuild["Tidak build"]
+    subgraph develop[Branch: develop]
+        D1[Stage: test] --> pytest_dev[pytest / SQLite in-memory]
+        pytest_dev --> NoBuild[X Tidak build]
     end
 
-    subgraph staging["Branch: staging"]
-        S1["Stage: test"] --> S_pytest["pytest"]
-        S_pytest --> S2["Stage: build"]
-        S2 --> S3["Docker build + push<br/>GitLab Registry"]
+    subgraph staging[Branch: staging]
+        S1[Stage: test] --> pytest_stg[pytest]
+        pytest_stg --> S2[Stage: build]
+        S2 --> S3[Docker build + push / GitLab Registry]
     end
 
-    subgraph main["Branch: main (production)"]
-        M1["Stage: test"] --> M_pytest["pytest"]
-        M_pytest --> M2["Stage: build"]
-        M2 --> M3["Docker build + push<br/>GitLab Registry<br/>tag: latest"]
+    subgraph main[Branch: main / production]
+        M1[Stage: test] --> pytest_prod[pytest]
+        pytest_prod --> M2[Stage: build]
+        M2 --> M3[Docker build + push / GitLab Registry / tag: latest]
     end
 ```
 
@@ -632,45 +607,45 @@ Diagram arsitektur lengkap tersedia di [`docs/architecture-diagram.jpg`](docs/ar
 
 ```mermaid
 graph TB
-    subgraph Clients["EXTERNAL CLIENTS"]
-        WA["Web App"]
-        MA["Mobile App"]
-        TP["Third Party"]
+    subgraph Clients[EXTERNAL CLIENTS]
+        WA[Web App]
+        MA[Mobile App]
+        TP[Third Party]
     end
 
-    subgraph Kong["KONG API GATEWAY<br/>(Port 8000)"]
-        KG["Rate Limiting · CORS · Auth · Service Routing"]
+    subgraph Kong[KONG API GATEWAY / Port 8000]
+        KG[Rate Limiting / CORS / Auth / Routing]
     end
 
-    subgraph Services["Microservices"]
-        US["USER :8001"]
-        NS["NOTIF :8002"]
-        SS["SCHOOL :8003"]
-        ST["SETTING :8004"]
-        PS["PPDB :8005"]
+    subgraph Services[Microservices]
+        US[USER :8001]
+        NS[NOTIF :8002]
+        SS[SCHOOL :8003]
+        ST[SETTING :8004]
+        PS[PPDB :8005]
     end
 
-    subgraph Broker["RABBITMQ / CloudAMQP"]
-        RMQ["ppdb_exchange (direct)"]
+    subgraph Broker[RabbitMQ / CloudAMQP]
+        RMQ[ppdb_exchange]
     end
 
-    subgraph Workers["Workers (consumers)"]
-        EM["Email Sender"]
-        PG["PDF Generator"]
-        EP["Event Processor"]
+    subgraph Workers[Workers]
+        EM[Email Sender]
+        PG[PDF Generator]
+        EP[Event Processor]
     end
 
-    subgraph External["EXTERNAL SERVICES"]
-        E1["PostgreSQL 16 (5 DBs)"]
-        E2["Redis"]
-        E3["Midtrans"]
-        E4["Supabase"]
-        E5["SendGrid + Resend"]
-        E6["Google OAuth"]
-        E7["CloudAMQP"]
+    subgraph External[External Services]
+        E1[PostgreSQL 16]
+        E2[Redis]
+        E3[Midtrans]
+        E4[Supabase]
+        E5[SendGrid / Resend]
+        E6[Google OAuth]
+        E7[CloudAMQP]
     end
 
-    WA & MA & TP -->|"HTTPS"| Kong
+    WA & MA & TP --> Kong
     Kong --> US & NS & SS & ST & PS
     US & NS & SS & ST & PS --> RMQ
     RMQ --> EM & PG & EP
